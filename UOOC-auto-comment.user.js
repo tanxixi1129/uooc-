@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         UOOC自动学习与评论
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  UOOC自动播放视频、处理测验、切换课程并自动发表评论
 // @author       Robin donald
 // @match        https://www.uooc.net.cn/home/learn/index*
@@ -24,6 +24,8 @@
     let autoCommentRunning = false;
     let autoPlayRunning = false;
     let autoPlayTimer = null;
+    let lastCompletionKey = '';
+    let lastCompletionAt = 0;
 
     const videoConfig = {
         autoPlay: true,
@@ -206,19 +208,11 @@
             return;
         }
 
+        // 只在速度确实变化时设置一次。点击页面速度按钮会再次触发 ratechange，
+        // 反复点击会让部分播放器陷入循环，直接设置 video 属性更稳定。
         if (video.playbackRate !== 2) {
             video.playbackRate = 2;
-        }
-
-        const speedButtons = document.querySelectorAll(
-            '.video-rate button, button[data-rate="2"], [class*="rate"] button'
-        );
-        for (const button of speedButtons) {
-            const label = button.textContent.trim();
-            if (label.includes('2') || label.includes('2x') || label.includes('2倍')) {
-                button.click();
-                break;
-            }
+            console.log('已设置2倍速播放');
         }
     }
 
@@ -284,59 +278,169 @@
         }, 500);
     }
 
-    function clickNextVideo() {
-        const videoItems = Array.from(document.querySelectorAll('.icon-video'))
-            .map(icon => icon.closest('.basic'))
+    function getCurrentResourceId() {
+        const parts = String(location.hash || '')
+            .replace(/^#\/?/, '')
+            .split('/')
             .filter(Boolean);
-        const currentItem = videoItems.find(item => item.classList.contains('active'));
+        const subsectionIndex = parts.lastIndexOf('subsection');
+
+        if (subsectionIndex > 0 && /^\d+$/.test(parts[subsectionIndex - 1])) {
+            return parts[subsectionIndex - 1];
+        }
+
+        for (let index = parts.length - 1; index >= 0; index -= 1) {
+            if (/^\d+$/.test(parts[index])) {
+                return parts[index];
+            }
+        }
+
+        return '';
+    }
+
+    function getVideoItems(root = document) {
+        const seen = new Set();
+        return Array.from(root.querySelectorAll('.basic.ng-scope, .basic'))
+            .filter(item => {
+                if (seen.has(item)) {
+                    return false;
+                }
+                seen.add(item);
+                return Boolean(item.querySelector('.icon-video')) ||
+                    /^\s*视频\b/.test(item.textContent || '');
+            });
+    }
+
+    function itemMatchesResourceId(item, resourceId) {
+        if (!item || !resourceId) {
+            return false;
+        }
+
+        if (item.id === resourceId) {
+            return true;
+        }
+
+        const attributes = ['data-id', 'data-resource-id', 'data-resourceid',
+            'data-video-id', 'ng-click', 'href'];
+        return attributes.some(name => {
+            const value = item.getAttribute && item.getAttribute(name);
+            return value && String(value).includes(resourceId);
+        }) || String(item.outerHTML || '').includes(resourceId);
+    }
+
+    function findCurrentVideoItem(videoItems) {
+        const resourceId = getCurrentResourceId();
+        const itemByUrl = videoItems.find(item => itemMatchesResourceId(item, resourceId));
+        if (itemByUrl) {
+            return itemByUrl;
+        }
+
+        return videoItems.find(item => item.matches('.active, .current, .selected') ||
+            item.querySelector('.active, .current, .selected')) || null;
+    }
+
+    function clickResourceItem(item) {
+        if (!item || typeof item.click !== 'function') {
+            return false;
+        }
+
+        try {
+            if (typeof item.scrollIntoView === 'function') {
+                item.scrollIntoView({ block: 'center' });
+            }
+            item.click();
+            setTimeout(setupVideoEvents, 1200);
+            return true;
+        } catch (error) {
+            console.error('切换视频失败:', error);
+            return false;
+        }
+    }
+
+    function clickNextVideo() {
+        const videoItems = getVideoItems();
+        const currentItem = findCurrentVideoItem(videoItems);
         const currentIndex = currentItem ? videoItems.indexOf(currentItem) : -1;
 
         if (currentIndex >= 0 && currentIndex < videoItems.length - 1) {
-            videoItems[currentIndex + 1].click();
-            setTimeout(setupVideoEvents, 1000);
-            return;
+            console.log('切换到当前小节的下一个视频');
+            return clickResourceItem(videoItems[currentIndex + 1]);
         }
 
-        if (!videoConfig.autoSwitch) {
-            return;
+        if (!videoConfig.autoSwitch || !currentItem) {
+            if (!currentItem) {
+                console.log('未找到当前视频条目，等待页面更新后重试');
+            }
+            return false;
         }
 
-        const activeSection = document.querySelector('.oneline.ng-binding.active');
-        const currentSection = activeSection && activeSection.closest('li');
+        // 页面实际结构中，视频条目位于小节 li 内；不依赖不存在的
+        // `.oneline.ng-binding.active`，直接从当前视频向上找到当前小节。
+        const currentSection = currentItem.closest('li');
         const nextSection = currentSection && currentSection.nextElementSibling;
-        const nextSectionLink = nextSection && nextSection.querySelector('.oneline.ng-binding');
+        const nextSectionLink = nextSection &&
+            nextSection.querySelector('.oneline.ng-binding, .oneline');
 
         if (nextSectionLink) {
+            console.log('当前小节视频已完成，切换到下一小节');
             nextSectionLink.click();
             setTimeout(() => {
-                const firstVideo = document.querySelector('.icon-video');
-                if (firstVideo) {
-                    firstVideo.closest('.basic')?.click();
-                    setTimeout(setupVideoEvents, 1500);
-                }
+                const firstVideo = getVideoItems(nextSection)[0] || getVideoItems()[0];
+                clickResourceItem(firstVideo);
             }, 1500);
-            return;
+            return true;
         }
 
-        const currentChapter = activeSection && activeSection.closest('.catalogItem');
+        const currentChapter = currentSection && currentSection.closest('.catalogItem');
         const nextChapter = currentChapter && currentChapter.nextElementSibling;
         const chapterLink = nextChapter && nextChapter.querySelector('.chapter');
         if (chapterLink) {
+            console.log('当前章节已完成，切换到下一章节');
             chapterLink.click();
             setTimeout(() => {
                 const firstSection = document.querySelector('.rank-2 li .basic');
-                if (firstSection) {
-                    firstSection.click();
-                    setTimeout(() => {
-                        const firstVideo = document.querySelector('.icon-video');
-                        if (firstVideo) {
-                            firstVideo.closest('.basic')?.click();
-                            setTimeout(setupVideoEvents, 1500);
-                        }
-                    }, 1500);
+                if (!firstSection) {
+                    return;
                 }
+                firstSection.click();
+                setTimeout(() => {
+                    clickResourceItem(getVideoItems()[0]);
+                }, 2000);
             }, 2000);
+            return true;
         }
+
+        console.log('课程中没有找到下一个视频');
+        return false;
+    }
+
+    function getVideoCompletionKey(video) {
+        return [location.hash, video.currentSrc || video.src || '', video.duration].join('|');
+    }
+
+    function handleVideoFinished(video) {
+        if (!videoConfig.autoSwitch || !video) {
+            return;
+        }
+
+        const duration = Number(video.duration);
+        const currentTime = Number(video.currentTime);
+        const finished = video.ended || (Number.isFinite(duration) && duration > 0 &&
+            currentTime >= duration - 0.5);
+        if (!finished) {
+            return;
+        }
+
+        const now = Date.now();
+        const key = getVideoCompletionKey(video);
+        if (key === lastCompletionKey && now - lastCompletionAt < 5000) {
+            return;
+        }
+
+        lastCompletionKey = key;
+        lastCompletionAt = now;
+        console.log('视频播放完成，准备切换下一个视频');
+        clickNextVideo();
     }
 
     function setupVideoEvents() {
@@ -346,9 +450,7 @@
         }
 
         video.dataset.uoocBound = 'true';
-        video.addEventListener('ended', () => {
-            if (videoConfig.autoSwitch) clickNextVideo();
-        });
+        video.addEventListener('ended', () => handleVideoFinished(video));
         video.addEventListener('ratechange', () => applyPlaybackRate(video));
         applyPlaybackRate(video);
     }
@@ -368,6 +470,7 @@
             if (videoConfig.autoQuiz) handleQuiz();
             handleVideoPlay();
             setupVideoEvents();
+            handleVideoFinished(getCurrentVideo());
         }, 2000);
         void autoPlayTimer;
     }
@@ -489,5 +592,5 @@
         subtree: true
     });
     setInterval(ensureControls, 2000);
-    console.info(`[UOOC自动学习与评论] v2.0 已加载：${location.href}`);
+    console.info(`[UOOC自动学习与评论] v2.1 已加载：${location.href}`);
 })();
