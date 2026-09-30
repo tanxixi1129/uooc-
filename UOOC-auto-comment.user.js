@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         UOOC自动评论
+// @name         UOOC自动学习与评论
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  自动在UOOC讨论区发表评论，默认每2分钟发表一次
+// @version      2.0
+// @description  UOOC自动播放视频、处理测验、切换课程并自动发表评论
 // @author       Robin donald
 // @match        https://www.uooc.net.cn/home/learn/index*
 // @match        *://www.uooc.net.cn/home/course/*
@@ -19,7 +19,18 @@
     'use strict';
 
     const START_BUTTON_ID = 'uooc-auto-comment-start';
+    const VIDEO_BUTTON_ID = 'uooc-auto-video-start';
+    const VIDEO_PANEL_ID = 'uooc-auto-video-panel';
     let autoCommentRunning = false;
+    let autoPlayRunning = false;
+    let autoPlayTimer = null;
+
+    const videoConfig = {
+        autoPlay: true,
+        autoSwitch: true,
+        autoQuiz: true,
+        doubleSpeed: true
+    };
 
     // 预设评论内容
     const COMMENTS = [
@@ -156,16 +167,16 @@
         autoComment();
     }
 
-    // 添加启动按钮；页面路由重绘后会自动补回
-    function ensureStartButton() {
-        if (!document.body || document.getElementById(START_BUTTON_ID)) {
+    // 添加评论启动按钮；页面路由重绘后会自动补回
+    function ensureCommentButton() {
+        if (!document.body || !/\/home\/course\//.test(location.pathname) || document.getElementById(START_BUTTON_ID)) {
             return;
         }
 
         const button = document.createElement('button');
         button.id = START_BUTTON_ID;
         button.type = 'button';
-        button.textContent = autoCommentRunning ? '评论中...' : '开始自动评论 v1.3';
+        button.textContent = autoCommentRunning ? '评论中...' : '开始自动评论';
         button.style.position = 'fixed';
         button.style.top = '80px';
         button.style.right = '24px';
@@ -184,6 +195,256 @@
         document.body.appendChild(button);
     }
 
+    // ---------- 自动看视频 ----------
+
+    function getCurrentVideo() {
+        return document.querySelector('video');
+    }
+
+    function applyPlaybackRate(video) {
+        if (!video || !videoConfig.doubleSpeed) {
+            return;
+        }
+
+        if (video.playbackRate !== 2) {
+            video.playbackRate = 2;
+        }
+
+        const speedButtons = document.querySelectorAll(
+            '.video-rate button, button[data-rate="2"], [class*="rate"] button'
+        );
+        for (const button of speedButtons) {
+            const label = button.textContent.trim();
+            if (label.includes('2') || label.includes('2x') || label.includes('2倍')) {
+                button.click();
+                break;
+            }
+        }
+    }
+
+    function handleVideoPlay() {
+        const video = getCurrentVideo();
+        if (!video) {
+            return;
+        }
+
+        if (videoConfig.autoPlay && video.paused && !video.ended) {
+            const playResult = video.play();
+            if (playResult && typeof playResult.catch === 'function') {
+                playResult.catch(error => console.log('播放失败:', error));
+            }
+        }
+
+        applyPlaybackRate(video);
+    }
+
+    function handleQuiz() {
+        const quizLayer = document.querySelector('.layui-layer.layui-layer-page');
+        if (!quizLayer || quizLayer.dataset.uoocHandled === 'true') {
+            return;
+        }
+
+        const options = Array.from(quizLayer.querySelectorAll(
+            'input[type="checkbox"], input[type="radio"]'
+        ));
+        if (!options.length) {
+            return;
+        }
+
+        const wrongTip = quizLayer.querySelector('.fl_left[style*="color:red"]');
+        if (wrongTip) {
+            const match = wrongTip.textContent.match(/:\s*(\[[\s\S]*\])\s*$/);
+            if (match) {
+                try {
+                    const answers = JSON.parse(match[1]);
+                    options.forEach(option => { option.checked = false; });
+                    answers.forEach(answer => {
+                        const option = options.find(item => item.value === answer);
+                        if (option) option.click();
+                    });
+                } catch (error) {
+                    console.log('解析答案出错:', error);
+                }
+            }
+        } else if (options[0].type === 'checkbox') {
+            const count = Math.min(options.length, Math.floor(Math.random() * 2) + 1);
+            const indexes = new Set();
+            while (indexes.size < count) {
+                indexes.add(Math.floor(Math.random() * options.length));
+            }
+            indexes.forEach(index => options[index].click());
+        } else {
+            options[Math.floor(Math.random() * options.length)].click();
+        }
+
+        quizLayer.dataset.uoocHandled = 'true';
+        setTimeout(() => {
+            const confirmButton = quizLayer.querySelector('.btn.btn-success');
+            if (confirmButton) confirmButton.click();
+        }, 500);
+    }
+
+    function clickNextVideo() {
+        const videoItems = Array.from(document.querySelectorAll('.icon-video'))
+            .map(icon => icon.closest('.basic'))
+            .filter(Boolean);
+        const currentItem = videoItems.find(item => item.classList.contains('active'));
+        const currentIndex = currentItem ? videoItems.indexOf(currentItem) : -1;
+
+        if (currentIndex >= 0 && currentIndex < videoItems.length - 1) {
+            videoItems[currentIndex + 1].click();
+            setTimeout(setupVideoEvents, 1000);
+            return;
+        }
+
+        if (!videoConfig.autoSwitch) {
+            return;
+        }
+
+        const activeSection = document.querySelector('.oneline.ng-binding.active');
+        const currentSection = activeSection && activeSection.closest('li');
+        const nextSection = currentSection && currentSection.nextElementSibling;
+        const nextSectionLink = nextSection && nextSection.querySelector('.oneline.ng-binding');
+
+        if (nextSectionLink) {
+            nextSectionLink.click();
+            setTimeout(() => {
+                const firstVideo = document.querySelector('.icon-video');
+                if (firstVideo) {
+                    firstVideo.closest('.basic')?.click();
+                    setTimeout(setupVideoEvents, 1500);
+                }
+            }, 1500);
+            return;
+        }
+
+        const currentChapter = activeSection && activeSection.closest('.catalogItem');
+        const nextChapter = currentChapter && currentChapter.nextElementSibling;
+        const chapterLink = nextChapter && nextChapter.querySelector('.chapter');
+        if (chapterLink) {
+            chapterLink.click();
+            setTimeout(() => {
+                const firstSection = document.querySelector('.rank-2 li .basic');
+                if (firstSection) {
+                    firstSection.click();
+                    setTimeout(() => {
+                        const firstVideo = document.querySelector('.icon-video');
+                        if (firstVideo) {
+                            firstVideo.closest('.basic')?.click();
+                            setTimeout(setupVideoEvents, 1500);
+                        }
+                    }, 1500);
+                }
+            }, 2000);
+        }
+    }
+
+    function setupVideoEvents() {
+        const video = getCurrentVideo();
+        if (!video || video.dataset.uoocBound === 'true') {
+            return;
+        }
+
+        video.dataset.uoocBound = 'true';
+        video.addEventListener('ended', () => {
+            if (videoConfig.autoSwitch) clickNextVideo();
+        });
+        video.addEventListener('ratechange', () => applyPlaybackRate(video));
+        applyPlaybackRate(video);
+    }
+
+    function startAutoPlaySystem(button) {
+        if (autoPlayRunning) {
+            return;
+        }
+
+        autoPlayRunning = true;
+        if (button) {
+            button.disabled = true;
+            button.textContent = '刷课运行中';
+        }
+        setupVideoEvents();
+        autoPlayTimer = setInterval(() => {
+            if (videoConfig.autoQuiz) handleQuiz();
+            handleVideoPlay();
+            setupVideoEvents();
+        }, 2000);
+        void autoPlayTimer;
+    }
+
+    function addVideoOption(panel, label, key) {
+        const row = document.createElement('label');
+        row.style.display = 'block';
+        row.style.marginBottom = '5px';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = videoConfig[key];
+        checkbox.addEventListener('change', () => {
+            videoConfig[key] = checkbox.checked;
+            if (key === 'doubleSpeed') applyPlaybackRate(getCurrentVideo());
+        });
+
+        row.appendChild(checkbox);
+        row.appendChild(document.createTextNode(` ${label}`));
+        panel.appendChild(row);
+    }
+
+    function ensureVideoPanel() {
+        if (!document.body || document.getElementById(VIDEO_PANEL_ID)) {
+            return;
+        }
+
+        const panel = document.createElement('div');
+        panel.id = VIDEO_PANEL_ID;
+        panel.style.position = 'fixed';
+        panel.style.top = '125px';
+        panel.style.left = '24px';
+        panel.style.zIndex = '2147483646';
+        panel.style.backgroundColor = 'rgba(255, 255, 255, 0.95)';
+        panel.style.padding = '10px';
+        panel.style.borderRadius = '5px';
+        panel.style.boxShadow = '0 0 10px rgba(0, 0, 0, 0.2)';
+        addVideoOption(panel, '自动播放', 'autoPlay');
+        addVideoOption(panel, '自动切换', 'autoSwitch');
+        addVideoOption(panel, '自动测验', 'autoQuiz');
+        addVideoOption(panel, '2倍速播放', 'doubleSpeed');
+        document.body.appendChild(panel);
+    }
+
+    function ensureVideoButton() {
+        if (!document.body || !/\/home\/learn\/index/.test(location.pathname)) {
+            return;
+        }
+
+        ensureVideoPanel();
+        if (document.getElementById(VIDEO_BUTTON_ID)) {
+            return;
+        }
+
+        const button = document.createElement('button');
+        button.id = VIDEO_BUTTON_ID;
+        button.type = 'button';
+        button.textContent = autoPlayRunning ? '刷课运行中' : '刷课启动';
+        button.style.position = 'fixed';
+        button.style.top = '80px';
+        button.style.left = '24px';
+        button.style.zIndex = '2147483647';
+        button.style.padding = '8px 16px';
+        button.style.backgroundColor = '#ff9800';
+        button.style.color = 'white';
+        button.style.border = 'none';
+        button.style.borderRadius = '4px';
+        button.style.cursor = 'pointer';
+        button.addEventListener('click', () => startAutoPlaySystem(button));
+        document.body.appendChild(button);
+    }
+
+    function ensureControls() {
+        ensureCommentButton();
+        ensureVideoButton();
+    }
+
     if (typeof GM_addStyle === 'function') {
         GM_addStyle(`
             #${START_BUTTON_ID} {
@@ -195,6 +456,15 @@
                 right: 24px !important;
                 z-index: 2147483647 !important;
             }
+            #${VIDEO_BUTTON_ID} {
+                display: block !important;
+                visibility: visible !important;
+                opacity: 1 !important;
+                position: fixed !important;
+                top: 80px !important;
+                left: 24px !important;
+                z-index: 2147483647 !important;
+            }
         `);
     }
 
@@ -202,19 +472,22 @@
         GM_registerMenuCommand('开始自动评论', () => {
             startAutoComment(document.getElementById(START_BUTTON_ID));
         });
+        GM_registerMenuCommand('启动刷课', () => {
+            startAutoPlaySystem(document.getElementById(VIDEO_BUTTON_ID));
+        });
     }
 
     // 等待页面加载，并持续处理 Angular 路由重绘
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', ensureStartButton);
+        document.addEventListener('DOMContentLoaded', ensureControls);
     } else {
-        ensureStartButton();
+        ensureControls();
     }
 
-    new MutationObserver(ensureStartButton).observe(document.documentElement, {
+    new MutationObserver(ensureControls).observe(document.documentElement, {
         childList: true,
         subtree: true
     });
-    setInterval(ensureStartButton, 2000);
-    console.info(`[UOOC自动评论] v1.3 已加载：${location.href}`);
+    setInterval(ensureControls, 2000);
+    console.info(`[UOOC自动学习与评论] v2.0 已加载：${location.href}`);
 })();
