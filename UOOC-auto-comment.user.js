@@ -11,8 +11,8 @@
 // @grant        GM_registerMenuCommand
 // @noframes
 // @license      Apache License 2.0
-// @downloadURL  https://raw.githubusercontent.com/tanxixi1129/-uooc-/main/UOOC-auto-comment.user.js
-// @updateURL    https://raw.githubusercontent.com/tanxixi1129/-uooc-/main/UOOC-auto-comment.user.js
+// @downloadURL  https://raw.githubusercontent.com/tanxixi1129/uooc-/main/UOOC-auto-comment.user.js
+// @updateURL    https://raw.githubusercontent.com/tanxixi1129/uooc-/main/UOOC-auto-comment.user.js
 // ==/UserScript==
 
 (function() {
